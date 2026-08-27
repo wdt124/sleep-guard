@@ -1,6 +1,8 @@
-# 睡眠守卫
+# Sleep Guard · 睡眠守卫
 
-一个运行在 Windows 上的温柔但不太容易摆烂的夜间自律守卫。它会在你设定的时间段内监测新启动的浏览器、Steam、Epic、战网及其游戏，关闭夜间娱乐程序并弹出睡觉提醒。
+> 一个会关掉深夜娱乐、哄你去睡觉，还用 JLPT N4 小测拦住摆烂的桌面伙伴。
+
+Sleep Guard 是一个运行在 Windows 上的温柔但不太容易摆烂的夜间自律守卫。它会在你设定的时间段内监测新启动的浏览器、Steam、Epic、战网及其游戏，关闭夜间娱乐程序并弹出睡觉提醒。
 
 ## 功能
 
@@ -19,8 +21,8 @@
 要求 Windows 10/11 与 Windows PowerShell 5.1。
 
 ```powershell
-git clone https://github.com/wdt124/sleep-guardian.git
-Set-Location .\sleep-guardian
+git clone https://github.com/wdt124/sleep-guard.git
+Set-Location .\sleep-guard
 Copy-Item .\config.example.json .\config.json
 notepad .\config.json
 & .\Install-SleepGuardian.ps1
