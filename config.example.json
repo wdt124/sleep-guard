@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 2,
+  "taskName": "SleepGuardian_Daily",
+  "windowStart": "02:00",
+  "windowEnd": "06:00",
+  "pollSeconds": 5,
+  "gracefulCloseSeconds": 3,
+  "notificationCooldownSeconds": 60,
+  "browserFamilies": [
+    { "name": "Chrome", "processes": ["chrome"] },
+    { "name": "Edge", "processes": ["msedge"] },
+    { "name": "Firefox", "processes": ["firefox"] },
+    { "name": "Brave", "processes": ["brave"] },
+    { "name": "Opera", "processes": ["opera", "opera_gx"] },
+    { "name": "Vivaldi", "processes": ["vivaldi"] },
+    { "name": "夸克浏览器", "processes": ["quark", "quarkbrowser"] }
+  ],
+  "launcherFamilies": [
+    {
+      "name": "Steam",
+      "triggerOnNew": ["steam", "gameoverlayui"],
+      "uiProcesses": ["steam", "steamwebhelper", "gameoverlayui"],
+      "ancestryProcesses": ["steam", "steamwebhelper", "gameoverlayui"],
+      "ignoreChildren": ["steam", "steamwebhelper", "steamservice", "steamerrorreporter"],
+      "closeProcesses": ["steam", "steamwebhelper", "gameoverlayui", "steamerrorreporter"]
+    },
+    {
+      "name": "Epic Games",
+      "triggerOnNew": ["epicgameslauncher"],
+      "uiProcesses": ["epicgameslauncher", "epicwebhelper"],
+      "ancestryProcesses": ["epicgameslauncher", "epicwebhelper"],
+      "ignoreChildren": ["epicgameslauncher", "epicwebhelper", "unrealcefsubprocess"],
+      "closeProcesses": ["epicgameslauncher", "epicwebhelper", "unrealcefsubprocess"]
+    },
+    {
+      "name": "战网",
+      "triggerOnNew": ["battle.net", "battlenet"],
+      "uiProcesses": ["battle.net", "battlenet", "blizzardbrowser"],
+      "ancestryProcesses": ["battle.net", "battlenet", "blizzardbrowser", "agent", "agenthelper"],
+      "ignoreChildren": ["battle.net", "battlenet", "blizzardbrowser", "agent", "agenthelper", "blizzarderror"],
+      "closeProcesses": ["battle.net", "battlenet", "blizzardbrowser", "agent", "agenthelper"]
+    }
+  ],
+  "extraGameRoots": [],
+  "llm": {
+    "enabled": false,
+    "apiMode": "chat-completions",
+    "baseUrl": "",
+    "apiKey": "",
+    "model": "",
+    "apiKeyEnvironmentVariable": "SLEEP_GUARDIAN_API_KEY",
+    "baseUrlEnvironmentVariable": "SLEEP_GUARDIAN_BASE_URL",
+    "modelEnvironmentVariable": "SLEEP_GUARDIAN_MODEL",
+    "requestTimeoutSeconds": 12
+  }
+}
