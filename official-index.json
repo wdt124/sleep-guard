@@ -1,0 +1,16 @@
+{
+  "policyUrl": "https://www.jlpt.jp/e/policy.html",
+  "sourceUrl": "https://www.jlpt.jp/e/samples/sampleindex.html",
+  "items": [
+    {"year":2012,"page":3,"number":10,"knowledgePointId":"n4-042","answer":4,"crop":[0.096,0.443,0.890,0.540]},
+    {"year":2012,"page":3,"number":11,"knowledgePointId":"n4-032","answer":1,"crop":[0.096,0.548,0.890,0.620]},
+    {"year":2012,"page":3,"number":12,"knowledgePointId":"n4-045","answer":1,"crop":[0.096,0.626,0.890,0.717]},
+    {"year":2012,"page":3,"number":13,"knowledgePointId":"n4-051","answer":3,"crop":[0.096,0.729,0.898,0.857]},
+    {"year":2012,"page":4,"number":14,"knowledgePointId":"n4-048","answer":4,"crop":[0.096,0.073,0.900,0.202]},
+    {"year":2012,"page":4,"number":15,"knowledgePointId":"n4-052","answer":2,"crop":[0.096,0.210,0.900,0.335]},
+    {"year":2018,"page":3,"number":10,"knowledgePointId":"n4-040","answer":4,"crop":[0.087,0.254,0.916,0.374]},
+    {"year":2018,"page":3,"number":13,"knowledgePointId":"n4-028","answer":3,"crop":[0.087,0.607,0.919,0.723]},
+    {"year":2018,"page":3,"number":14,"knowledgePointId":"n4-026","answer":1,"crop":[0.087,0.744,0.919,0.930]},
+    {"year":2018,"page":4,"number":15,"knowledgePointId":"n4-048","answer":2,"crop":[0.087,0.073,0.919,0.341]}
+  ]
+}

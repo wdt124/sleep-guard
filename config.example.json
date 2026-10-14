@@ -51,6 +51,7 @@
     "apiKeyEnvironmentVariable": "SLEEP_GUARDIAN_API_KEY",
     "baseUrlEnvironmentVariable": "SLEEP_GUARDIAN_BASE_URL",
     "modelEnvironmentVariable": "SLEEP_GUARDIAN_MODEL",
-    "requestTimeoutSeconds": 12
+    "requestTimeoutSeconds": 12,
+    "quizRequestTimeoutSeconds": 60
   }
 }

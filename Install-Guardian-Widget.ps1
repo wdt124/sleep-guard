@@ -7,6 +7,9 @@ $LauncherPath = Join-Path $PSScriptRoot 'Launch-Guardian-Widget.vbs'
 $TaskName = 'SleepGuardian_Widget'
 if (-not (Test-Path -LiteralPath $WidgetPath)) { throw "缺少桌面小窗脚本：$WidgetPath" }
 if (-not (Test-Path -LiteralPath $LauncherPath)) { throw "缺少静默启动器：$LauncherPath" }
+foreach($name in @('Learning-Engine.ps1','Learning-Library.ps1','knowledge-bank.json','official-index.json')){
+    if(-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot $name))){throw "缺少学习功能文件：$name"}
+}
 
 $userId = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 $wscript = Join-Path $env:SystemRoot 'System32\wscript.exe'

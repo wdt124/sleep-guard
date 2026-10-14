@@ -3,3 +3,10 @@ config.json
 *-preview.png
 .DS_Store
 Thumbs.db
+__pycache__/
+tmp/
+*.tmp
+learning-history.json
+reviewed-questions.json
+official-questions.json
+official/

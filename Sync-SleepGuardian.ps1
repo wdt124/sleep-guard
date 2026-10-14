@@ -26,10 +26,11 @@ try {
             & git check-ignore --quiet -- config.json
             if ($LASTEXITCODE -ne 0) { throw '安全检查失败：config.json 没有被 .gitignore 排除。' }
 
-            & git ls-files --error-unmatch -- config.json 2>$null | Out-Null
-            if ($LASTEXITCODE -eq 0) { throw '安全检查失败：config.json 已被 Git 跟踪。' }
+            $trackedConfig=@(& git ls-files -- config.json)
+            if ($trackedConfig.Count -gt 0) { throw '安全检查失败：config.json 已被 Git 跟踪。' }
 
             & git add --all
+            if ($LASTEXITCODE -ne 0) { throw '暂存失败。' }
             & git diff --cached --quiet
             if ($LASTEXITCODE -eq 1) {
                 & git commit -m $Message

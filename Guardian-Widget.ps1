@@ -5,7 +5,10 @@ param(
     [switch]$PreviewQuiz,
     [switch]$PreviewReview,
     [switch]$PreviewStudy,
-    [switch]$TestScheduleUpdate
+    [switch]$TestScheduleUpdate,
+    [switch]$PreviewLibrary,
+    [switch]$TestLearning,
+    [switch]$TestUi
 )
 
 $ErrorActionPreference = 'Stop'
@@ -44,7 +47,12 @@ function Write-QuizLog {
 function Write-JsonFile {
     param([string]$Path, $Value)
     $json = $Value | ConvertTo-Json -Depth 30
-    [System.IO.File]::WriteAllText($Path, $json, [System.Text.UTF8Encoding]::new($false))
+    $temporary = $Path + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
+    try {
+        [System.IO.File]::WriteAllText($temporary, $json, [System.Text.UTF8Encoding]::new($false))
+        if ([IO.File]::Exists($Path)) { [IO.File]::Replace($temporary,$Path,[NullString]::Value) }
+        else { [IO.File]::Move($temporary,$Path) }
+    } finally { if([IO.File]::Exists($temporary)){[IO.File]::Delete($temporary)} }
 }
 
 function Get-PropertyValue {
@@ -166,7 +174,7 @@ function Test-QuestionObject {
     foreach ($optionValue in $optionsValue) { $options += $optionValue }
     $correctIndexRaw = Get-PropertyValue $Question 'correctIndex' $null
     if ([string]::IsNullOrWhiteSpace($knowledgePointId) -or -not $AllowedKnowledgeIds.Contains($knowledgePointId)) { return $false }
-    if ([string]::IsNullOrWhiteSpace($stem) -or ($stem -notmatch '（\s*）|_{2,}')) { return $false }
+    if ([string]::IsNullOrWhiteSpace($stem) -or ([regex]::Matches($stem,'（\s*）|_{2,}').Count -ne 1)) { return $false }
     if ([string]::IsNullOrWhiteSpace($grammarPoint) -or [string]::IsNullOrWhiteSpace($explanation)) { return $false }
     if ($options.Count -ne 4) { return $false }
     $optionSet = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
@@ -185,11 +193,12 @@ function ConvertTo-ValidatedQuestionSet {
     if ($sourceValue -is [Array] -and $sourceValue.Count -eq 1 -and $sourceValue[0] -is [Array]) { $sourceValue = $sourceValue[0] }
     $source = @()
     foreach ($sourceItem in $sourceValue) { $source += $sourceItem }
-    if ($source.Count -ne $script:ExamQuestionCount) { throw "题目数量不是 $($script:ExamQuestionCount)（实际为 $($source.Count)）。" }
+    $expectedCount = @($KnowledgePoints).Count
+    if ($expectedCount -lt 1 -or $expectedCount -gt $script:ExamQuestionCount -or $source.Count -ne $expectedCount) { throw "题目数量不匹配知识点数量（实际为 $($source.Count)）。" }
     $seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $allowedKnowledgeIds = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($point in @($KnowledgePoints)) { [void]$allowedKnowledgeIds.Add([string]$point.id) }
-    if ($allowedKnowledgeIds.Count -ne $script:ExamQuestionCount) { throw '本次抽取的知识点数量不正确。' }
+    if ($allowedKnowledgeIds.Count -ne $expectedCount) { throw '本次抽取的知识点数量不正确。' }
     $usedKnowledgeIds = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $excluded = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($stem in @($ExcludedStems)) { [void]$excluded.Add([string]$stem) }
@@ -209,12 +218,16 @@ function ConvertTo-ValidatedQuestionSet {
             correctIndex = [int]$question.correctIndex
             explanation = ([string]$question.explanation).Trim()
             grammarPoint = ([string]$question.grammarPoint).Trim()
+            source = [string](Get-PropertyValue $question 'source' '原创练习题')
+            sourceUrl = [string](Get-PropertyValue $question 'sourceUrl' '')
+            imagePath = [string](Get-PropertyValue $question 'imagePath' '')
         }
     }
     return $validated
 }
 
 function Get-QuestionJsonSchema {
+    param([int]$Count = 10)
     return [ordered]@{
         type = 'object'
         additionalProperties = $false
@@ -222,8 +235,8 @@ function Get-QuestionJsonSchema {
         properties = [ordered]@{
             questions = [ordered]@{
                 type = 'array'
-                minItems = 10
-                maxItems = 10
+                minItems = $Count
+                maxItems = $Count
                 items = [ordered]@{
                     type = 'object'
                     additionalProperties = $false
@@ -320,75 +333,6 @@ function Get-HttpErrorDetail {
     return $message
 }
 
-function Invoke-LlmQuestionRequest {
-    param($KnowledgePoints, [string[]]$ExcludedStems = @())
-    $settings = Get-LlmSettings
-    if (-not $settings.enabled -or [string]::IsNullOrWhiteSpace($settings.apiKey) -or
-        [string]::IsNullOrWhiteSpace($settings.baseUrl) -or [string]::IsNullOrWhiteSpace($settings.model)) {
-        throw 'LLM 尚未完整配置。'
-    }
-
-    $excludedText = if ($ExcludedStems.Count -gt 0) { ($ExcludedStems | Select-Object -Last 30) -join ' / ' } else { '无' }
-    $studyInput = @($KnowledgePoints | ForEach-Object {
-        [ordered]@{
-            id = [string]$_.id
-            category = [string]$_.category
-            title = [string]$_.title
-            content = [string]$_.content
-            example = [string]$_.example
-            translation = [string]$_.translation
-        }
-    }) | ConvertTo-Json -Depth 8 -Compress
-    $prompt = @"
-根据下方 10 个“今日 N4 知识点”生成 JLPT N4 难度的日语选择填空试卷。每个知识点必须正好生成一道题，共 10 题，不得引入未提供的知识点。
-规则：最终返回一个 json 对象。每题 knowledgePointId 必须原样使用对应知识点的 id；stem 必须有且只有一个填空，用全角括号“（　）”标记；options 必须正好 4 个且互不相同；只有一个无歧义正确答案；correctIndex 是 0 到 3 的整数；explanation 用不超过 100 个汉字的简体中文说明；grammarPoint 写对应知识点标题。题目可考生词、语法、活用或句型，但不要超出 N4 难度，不要输出寒暄或 Markdown。
-结构示例：{"questions":[{"id":"1","knowledgePointId":"n4-001","stem":"例文（　）。","options":["A","B","C","D"],"correctIndex":0,"explanation":"简短解析","grammarPoint":"知识点标题"}]}
-今日知识点：$studyInput
-本次不要复用这些题干：$excludedText
-"@
-    $schema = Get-QuestionJsonSchema
-    $headers = @{ Authorization = "Bearer $($settings.apiKey)"; 'Content-Type' = 'application/json' }
-    $attemptModes = if ($settings.apiMode -eq 'chat-completions') { @('chat-json','chat-schema') } else { @('responses','chat-schema','chat-json') }
-    $lastError = $null
-
-    foreach ($mode in $attemptModes) {
-        try {
-            if ($mode -eq 'responses') {
-                $body = [ordered]@{
-                    model = $settings.model
-                    input = $prompt
-                    text = @{ format = @{ type = 'json_schema'; name = 'jlpt_n4_daily_exam'; strict = $true; schema = $schema } }
-                }
-                $jsonBody = $body | ConvertTo-Json -Depth 30 -Compress
-                $response = Invoke-RestMethod -Method Post -Uri (Get-ApiEndpoint $settings.baseUrl 'responses') -Headers $headers -Body ([Text.Encoding]::UTF8.GetBytes($jsonBody)) -TimeoutSec $settings.timeout
-                $document = ConvertFrom-ModelJson (Get-ResponsesText $response)
-            }
-            else {
-                $format = if ($mode -eq 'chat-schema') {
-                    @{ type = 'json_schema'; json_schema = @{ name = 'jlpt_n4_daily_exam'; strict = $true; schema = $schema } }
-                } else { @{ type = 'json_object' } }
-                $body = [ordered]@{
-                    model = $settings.model
-                    messages = @(@{ role = 'user'; content = $prompt })
-                    thinking = @{ type = 'disabled' }
-                    max_tokens = 8000
-                    response_format = $format
-                }
-                $jsonBody = $body | ConvertTo-Json -Depth 30 -Compress
-                $response = Invoke-RestMethod -Method Post -Uri (Get-ApiEndpoint $settings.baseUrl 'chat/completions') -Headers $headers -Body ([Text.Encoding]::UTF8.GetBytes($jsonBody)) -TimeoutSec $settings.timeout
-                $content = [string]$response.choices[0].message.content
-                $document = ConvertFrom-ModelJson $content
-            }
-            return ConvertTo-ValidatedQuestionSet -Document $document -KnowledgePoints $KnowledgePoints -ExcludedStems $ExcludedStems
-        }
-        catch {
-            $lastError = Get-HttpErrorDetail $_
-            Write-QuizLog "LLM 出题方式 $mode 失败：$lastError"
-        }
-    }
-    throw "LLM 出题失败：$lastError"
-}
-
 function Get-LocalQuestionSet {
     param($KnowledgePoints)
     $questions = @()
@@ -404,19 +348,6 @@ function Get-LocalQuestionSet {
         }
     }
     return ConvertTo-ValidatedQuestionSet -Document ([pscustomobject]@{ questions = $questions }) -KnowledgePoints $KnowledgePoints
-}
-
-function Get-QuestionSet {
-    param($KnowledgePoints, [string[]]$ExcludedStems = @())
-    try {
-        $questions = Invoke-LlmQuestionRequest -KnowledgePoints $KnowledgePoints -ExcludedStems $ExcludedStems
-        return [pscustomobject]@{ Source = 'LLM · 今日 N4 知识点'; Questions = @($questions) }
-    }
-    catch {
-        Write-QuizLog "改用本地题库：$($_.Exception.Message)"
-        $questions = Get-LocalQuestionSet -KnowledgePoints $KnowledgePoints
-        return [pscustomobject]@{ Source = '今日 N4 知识点 · 本地题'; Questions = @($questions) }
-    }
 }
 
 function Test-KnowledgePoint {
@@ -448,39 +379,11 @@ function Assert-KnowledgeBank {
     }
 }
 
-function Get-DailyKnowledgeSet {
-    $today = Get-Date -Format 'yyyy-MM-dd'
-    if (Test-Path -LiteralPath $DailyStudyPath) {
-        try {
-            $cached = Get-Content -LiteralPath $DailyStudyPath -Raw -Encoding UTF8 | ConvertFrom-Json
-            $cachedPoints = @($cached.points)
-            $validIds = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-            foreach ($point in @($script:KnowledgeBank)) { [void]$validIds.Add([string]$point.id) }
-            $allValid = ($cachedPoints.Count -eq $script:DailyKnowledgeCount)
-            foreach ($point in $cachedPoints) { if (-not $validIds.Contains([string]$point.id)) { $allValid = $false; break } }
-            if ([string]$cached.date -eq $today -and $allValid) { return $cachedPoints }
-        } catch { Write-QuizLog "忽略无效的每日知识点缓存：$($_.Exception.Message)" }
-    }
-    $selected = @($script:KnowledgeBank | Get-Random -Count $script:DailyKnowledgeCount)
-    Write-JsonFile -Path $DailyStudyPath -Value ([ordered]@{
-        date = $today
-        level = 'N4'
-        createdAt = [DateTimeOffset]::Now.ToString('o')
-        points = $selected
-    })
-    return $selected
-}
+. (Join-Path $PSScriptRoot 'Learning-Engine.ps1')
 
-function Get-ExamKnowledgePoints {
-    param($DailyPoints)
-    $available = @($DailyPoints | Where-Object { -not $script:UsedKnowledgeIds.Contains([string]$_.id) })
-    if ($available.Count -lt $script:ExamQuestionCount) {
-        $script:UsedKnowledgeIds.Clear()
-        $available = @($DailyPoints)
-    }
-    $selected = @($available | Get-Random -Count $script:ExamQuestionCount)
-    foreach ($point in $selected) { $script:UsedKnowledgeIds.Add([string]$point.id) }
-    return $selected
+if ($TestLearning) {
+    . (Join-Path $PSScriptRoot 'Test-Learning.ps1')
+    exit 0
 }
 
 if ($SelfTest) {
@@ -506,7 +409,7 @@ if ($SelfTest) {
 if ($TestQuestionGeneration) {
     Assert-KnowledgeBank
     $daily = Get-DailyKnowledgeSet
-    $selectedPoints = @($daily | Select-Object -First $script:ExamQuestionCount)
+    $selectedPoints = @(Get-ExamKnowledgePoints -DailyPoints $daily)
     $exam = Get-QuestionSet -KnowledgePoints $selectedPoints
     [pscustomobject]@{
         Source = $exam.Source
@@ -564,6 +467,21 @@ function New-UiButton {
     $button.Font = $script:UiFont
     $button.Cursor = [Windows.Forms.Cursors]::Hand
     return $button
+}
+
+function Show-GuardianDialog {
+    param([Windows.Forms.Form]$Dialog, [Windows.Forms.Form]$Owner, [string]$Name)
+    if($script:UiTestRoot){
+        $capturePath=Join-Path $script:UiTestRoot ($Name+'.png')
+        $Dialog.Add_Shown({
+            $this.Refresh()
+            $bitmap=New-Object Drawing.Bitmap($this.Width,$this.Height)
+            try{$this.DrawToBitmap($bitmap,(New-Object Drawing.Rectangle(0,0,$this.Width,$this.Height)));$bitmap.Save($capturePath)}finally{$bitmap.Dispose()}
+            $this.DialogResult=[Windows.Forms.DialogResult]::Cancel
+            $this.Close()
+        }.GetNewClosure())
+    }
+    return $Dialog.ShowDialog($Owner)
 }
 
 function Show-DailyKnowledgeForm {
@@ -679,7 +597,7 @@ function Show-DailyKnowledgeForm {
     $panel.Add_MouseWheel($checkReadToEnd)
     $panel.Add_Resize($checkReadToEnd)
 
-    $result = $form.ShowDialog($Owner)
+    $result = Show-GuardianDialog $form $Owner 'study'
     $form.Dispose()
     return $result
 }
@@ -695,16 +613,31 @@ function Show-LoadingForm {
     $form.TopMost = $true
     $form.BackColor = $script:Colors.Background
     $label = New-Object Windows.Forms.Label
-    $label.Text = "正在从今天的 N4 知识点中准备 10 道题……`r`n接口暂时不可用时会自动换成本地题，请稍等一下。"
+    $label.Text = "正在准备 10 道题……`r`n优先公开真题；生成题依次经过出题、N4 范围审查、独立解题复核。"
     $label.Font = $script:UiFont
     $label.ForeColor = $script:Colors.Text
     $label.TextAlign = 'MiddleCenter'
     $label.Dock = 'Fill'
     $form.Controls.Add($label)
+    $script:PreparationLabel=$label
     $form.Show($Owner)
     $form.Refresh()
     [Windows.Forms.Application]::DoEvents()
     return $form
+}
+
+function New-QuestionPicture {
+    param($Question, [int]$Width = 770)
+    $path = [string](Get-PropertyValue $Question 'imagePath' '')
+    if (-not $path) { return $null }
+    $picture=New-Object Windows.Forms.PictureBox
+    $original=[Drawing.Image]::FromFile($path)
+    try { $picture.Image=New-Object Drawing.Bitmap($original) } finally { $original.Dispose() }
+    $height=[int][Math]::Ceiling($picture.Image.Height * ($Width / [double]$picture.Image.Width))
+    $picture.Size=New-Object Drawing.Size($Width,$height)
+    $picture.SizeMode='Zoom'
+    $picture.Add_Disposed({if($this.Image){$this.Image.Dispose()}})
+    return $picture
 }
 
 function Show-QuizForm {
@@ -746,35 +679,45 @@ function Show-QuizForm {
     for ($i = 0; $i -lt $Exam.Questions.Count; $i++) {
         $q = $Exam.Questions[$i]
         $group = New-Object Windows.Forms.GroupBox
-        $group.Text = "第 $($i + 1) 题　$($q.grammarPoint)"
+        $group.Text = "第 $($i + 1) 题"
         $group.Font = $script:UiFont
         $group.ForeColor = $script:Colors.Text
         $group.BackColor = $script:Colors.Card
         $group.Location = New-Object Drawing.Point(6, $y)
-        $group.Size = New-Object Drawing.Size(810, 174)
+        $group.Size = New-Object Drawing.Size(810, 230)
         $group.Anchor = 'Top,Left,Right'
 
-        $stem = New-Object Windows.Forms.Label
-        $stem.Text = [string]$q.stem
-        $stem.Font = $script:JapaneseFont
-        $stem.Location = New-Object Drawing.Point(18, 27)
-        $stem.Size = New-Object Drawing.Size(770, 30)
-        $group.Controls.Add($stem)
+        $picture=New-QuestionPicture $q
+        if($null -ne $picture){
+            $picture.Location=New-Object Drawing.Point(18,27)
+            $group.Controls.Add($picture)
+            $optionsTop=37+$picture.Height
+            $group.Height=$optionsTop+80
+        } else {
+            $stem = New-Object Windows.Forms.Label
+            $stem.Text = [string]$q.stem
+            $stem.Font = $script:JapaneseFont
+            $stem.Location = New-Object Drawing.Point(18, 27)
+            $stem.Size = New-Object Drawing.Size(770, 66)
+            $group.Controls.Add($stem)
+            $optionsTop=99
+        }
 
         $buttons = @()
         for ($j = 0; $j -lt 4; $j++) {
             $radio = New-Object Windows.Forms.RadioButton
-            $radio.Text = "{0}. {1}" -f ([char](65 + $j)), [string]$q.options[$j]
+            $radio.Text = if($picture){"选择原题第 $($j+1) 项"}else{"{0}. {1}" -f ([char](65 + $j)), [string]$q.options[$j]}
             $radio.Font = $script:JapaneseFont
-            $radio.Location = New-Object Drawing.Point((18 + (($j % 2) * 390)), (65 + ([Math]::Floor($j / 2) * 43)))
-            $radio.Size = New-Object Drawing.Size(370, 30)
+            $rowHeight=if($picture){35}else{60}
+            $radio.Location = New-Object Drawing.Point((18 + (($j % 2) * 390)), ($optionsTop + ([Math]::Floor($j / 2) * $rowHeight)))
+            $radio.Size = New-Object Drawing.Size(370, ($rowHeight-4))
             $radio.Tag = $j
             $group.Controls.Add($radio)
             $buttons += $radio
         }
         $panel.Controls.Add($group)
         $answerGroups += [pscustomobject]@{ Question = $q; Buttons = $buttons }
-        $y += 184
+        $y += $group.Height+10
     }
     $panel.AutoScrollMinSize = New-Object Drawing.Size(0, ($y + 4))
 
@@ -809,7 +752,10 @@ function Show-QuizForm {
         $quizForm.Close()
     })
 
-    $result = $form.ShowDialog($Owner)
+    if($script:UiTestRoot){
+        foreach($group in $panel.Controls){if($group.Text -notmatch '^第 \d+ 题$'){throw '答题页泄露了知识点提示。'}}
+    }
+    $result = Show-GuardianDialog $form $Owner 'quiz'
     $answersResult = $form.Tag.Answers
     $form.Dispose()
     if ($result -ne [Windows.Forms.DialogResult]::OK) { return $null }
@@ -854,7 +800,7 @@ function Show-ReviewForm {
         $isRight = $chosen -eq $correct
         $card = New-Object Windows.Forms.Panel
         $card.Location = New-Object Drawing.Point(6, $y)
-        $card.Size = New-Object Drawing.Size(810, 190)
+        $card.Size = New-Object Drawing.Size(810, 262)
         $card.Anchor = 'Top,Left,Right'
         $card.BackColor = if ($isRight) { $script:Colors.Right } else { $script:Colors.Wrong }
 
@@ -862,27 +808,38 @@ function Show-ReviewForm {
         $qLabel.Text = "第 $($i + 1) 题　$($q.stem)"
         $qLabel.Font = $script:JapaneseFont
         $qLabel.Location = New-Object Drawing.Point(14, 12)
-        $qLabel.Size = New-Object Drawing.Size(775, 28)
+        $qLabel.Size = New-Object Drawing.Size(775, 64)
         $card.Controls.Add($qLabel)
+
+        $picture=New-QuestionPicture $q -Width 775
+        $answerTop=80
+        if($picture){
+            $qLabel.Text="第 $($i+1) 题 · 官方原题"
+            $qLabel.Height=26
+            $picture.Location=New-Object Drawing.Point(14,44)
+            $card.Controls.Add($picture)
+            $answerTop=52+$picture.Height
+            $card.Height=$answerTop+174
+        }
 
         $answerLabel = New-Object Windows.Forms.Label
         $answerLabel.Text = "你的答案：$([char](65 + $chosen)). $($q.options[$chosen])　　正确答案：$([char](65 + $correct)). $($q.options[$correct])"
         $answerLabel.Font = $script:UiFont
         $answerLabel.ForeColor = if ($isRight) { $script:Colors.Green } else { $script:Colors.Rose }
-        $answerLabel.Location = New-Object Drawing.Point(14, 48)
+        $answerLabel.Location = New-Object Drawing.Point(14, $answerTop)
         $answerLabel.Size = New-Object Drawing.Size(775, 27)
         $card.Controls.Add($answerLabel)
 
         $explain = New-Object Windows.Forms.Label
-        $explain.Text = "语法点：$($q.grammarPoint)`r`n解析：$($q.explanation)"
+        $explain.Text = "知识点：$($q.grammarPoint)`r`n解析：$($q.explanation)`r`n出处：$($q.source) $($q.sourceUrl)"
         $explain.Font = $script:UiFont
         $explain.ForeColor = $script:Colors.Text
-        $explain.Location = New-Object Drawing.Point(14, 80)
-        $explain.Size = New-Object Drawing.Size(775, 96)
+        $explain.Location = New-Object Drawing.Point(14, ($answerTop+35))
+        $explain.Size = New-Object Drawing.Size(775, 135)
         $card.Controls.Add($explain)
 
         $panel.Controls.Add($card)
-        $y += 200
+        $y += $card.Height+10
     }
     $panel.AutoScrollMinSize = New-Object Drawing.Size(0, ($y + 4))
 
@@ -914,7 +871,7 @@ function Show-ReviewForm {
         $form.AcceptButton = $retry
         $form.CancelButton = $giveUp
     }
-    $result = $form.ShowDialog($Owner)
+    $result = Show-GuardianDialog $form $Owner 'review'
     $form.Dispose()
     return $result
 }
@@ -934,6 +891,7 @@ function Invoke-QuizUnlock {
     $dailyPoints = @(Get-DailyKnowledgeSet)
     $studyResult = Show-DailyKnowledgeForm -Owner $Owner -KnowledgePoints $dailyPoints
     if ($studyResult -ne [Windows.Forms.DialogResult]::OK) { return }
+    Register-StudyExposure $dailyPoints
     $script:UsedKnowledgeIds.Clear()
     $script:UsedStems.Clear()
 
@@ -941,10 +899,17 @@ function Invoke-QuizUnlock {
         $examKnowledge = @(Get-ExamKnowledgePoints -DailyPoints $dailyPoints)
         $loading = Show-LoadingForm -Owner $Owner
         try { $exam = Get-QuestionSet -KnowledgePoints $examKnowledge -ExcludedStems @($script:UsedStems) }
-        finally { $loading.Close(); $loading.Dispose() }
+        catch {
+            $loading.Close()
+            [void][Windows.Forms.MessageBox]::Show($Owner, $_.Exception.Message, '暂时没有准备好合格试卷', 'OK', 'Information')
+            return
+        }
+        finally { $script:PreparationLabel=$null; $loading.Close(); $loading.Dispose() }
+        [void][Windows.Forms.MessageBox]::Show($Owner, $exam.Description, '本次试卷来源与审查结果', 'OK', 'Information')
         foreach ($question in $exam.Questions) { $script:UsedStems.Add([string]$question.stem) }
         $answers = Show-QuizForm -Owner $Owner -Exam $exam
         if ($null -eq $answers) { return }
+        Save-ExamResult -Exam $exam -Answers $answers
         $review = Show-ReviewForm -Owner $Owner -Exam $exam -Answers $answers
         if ($review -eq [Windows.Forms.DialogResult]::OK) {
             $until = Disable-GuardianTonight -Mode QuizPassed
@@ -1124,6 +1089,23 @@ if ($TestScheduleUpdate) {
     exit 0
 }
 
+. (Join-Path $PSScriptRoot 'Learning-Library.ps1')
+
+if($TestUi){
+    . (Join-Path $PSScriptRoot 'Test-UI.ps1')
+    exit 0
+}
+
+if ($PreviewLibrary) {
+    $previewOwner = New-Object Windows.Forms.Form
+    $previewOwner.Opacity = 0
+    $previewOwner.ShowInTaskbar = $false
+    $previewOwner.Show()
+    Show-LearningLibrary -Owner $previewOwner
+    $previewOwner.Dispose()
+    exit 0
+}
+
 if ($PreviewStudy) {
     $previewOwner = New-Object Windows.Forms.Form
     $previewOwner.Opacity = 0
@@ -1178,7 +1160,7 @@ $showEvent = New-Object Threading.EventWaitHandle($false, [Threading.EventResetM
 
 $form = New-Object Windows.Forms.Form
 $form.Text = '睡眠守卫'
-$form.Size = New-Object Drawing.Size(318, 178)
+$form.Size = New-Object Drawing.Size(318, 218)
 $form.FormBorderStyle = 'None'
 $form.StartPosition = 'Manual'
 $form.ShowInTaskbar = $false
@@ -1232,9 +1214,18 @@ $hint = New-Object Windows.Forms.Label
 $hint.Text = '拖动空白处移动 · “—”隐藏 · 双击托盘再次唤起'
 $hint.ForeColor = $script:Colors.Muted
 $hint.Font = New-Object Drawing.Font('Microsoft YaHei UI', 7.8)
-$hint.Location = New-Object Drawing.Point(17, 136)
+$hint.Location = New-Object Drawing.Point(17, 182)
 $hint.Size = New-Object Drawing.Size(285, 22)
 $form.Controls.Add($hint)
+
+$libraryButton = New-UiButton -Text '知识库' -Width 140 -Height 32
+$libraryButton.Location = New-Object Drawing.Point(16, 136)
+$libraryButton.Add_Click({ Show-LearningLibrary -Owner $form })
+$form.Controls.Add($libraryButton)
+$mistakeButton = New-UiButton -Text '错题本' -Width 144 -Height 32 -BackColor $script:Colors.Muted
+$mistakeButton.Location = New-Object Drawing.Point(162, 136)
+$mistakeButton.Add_Click({ Show-LearningLibrary -Owner $form -Mistakes })
+$form.Controls.Add($mistakeButton)
 
 function Update-WidgetStatus {
     $state = Get-GuardianState
@@ -1326,9 +1317,13 @@ foreach ($control in $dragControls) {
 $trayMenu = New-Object Windows.Forms.ContextMenuStrip
 $showItem = $trayMenu.Items.Add('显示睡眠守卫')
 $enableItem = $trayMenu.Items.Add('立即重新开启')
+$libraryItem = $trayMenu.Items.Add('打开知识库')
+$mistakeItem = $trayMenu.Items.Add('打开错题本')
 $exitItem = $trayMenu.Items.Add('退出小窗（不关闭守卫）')
 $showItem.Add_Click({ Show-Widget -Form $form })
 $enableItem.Add_Click({ Enable-Guardian; Update-WidgetStatus; Show-Widget -Form $form })
+$libraryItem.Add_Click({ Show-LearningLibrary -Owner $form })
+$mistakeItem.Add_Click({ Show-LearningLibrary -Owner $form -Mistakes })
 $exitItem.Add_Click({ $script:AllowExit = $true; $form.Close() })
 
 $tray = New-Object Windows.Forms.NotifyIcon
