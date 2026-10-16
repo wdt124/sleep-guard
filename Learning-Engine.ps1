@@ -36,6 +36,7 @@ function Get-LearningProfile {
         pending = @((Get-PropertyValue $saved 'pending' @()))
         history = @((Get-PropertyValue $saved 'history' @()))
         seen = @((Get-PropertyValue $saved 'seen' @()))
+        quarantined = @((Get-PropertyValue $saved 'quarantined' @()))
         revision = [int](Get-PropertyValue $saved 'revision' 0)
     }
 }
@@ -49,6 +50,7 @@ function Save-LearningProfile {
         pending = @($Profile.pending)
         history = @($Profile.history | Select-Object -Last 200)
         seen = @($Profile.seen | Select-Object -Last 1000)
+        quarantined = @($Profile.quarantined)
     })
 }
 
@@ -163,6 +165,9 @@ function Save-ExamResult {
     param($Exam, [int[]]$Answers)
     if ($Answers.Count -ne $Exam.Questions.Count -or $Answers -contains -1) { throw '不能保存未完成的试卷。' }
     $profile = Get-LearningProfile
+    $attemptId=[string](Get-PropertyValue $Exam 'AttemptId' '')
+    if(-not $attemptId){$attemptId=[guid]::NewGuid().ToString();$Exam|Add-Member NoteProperty AttemptId $attemptId -Force}
+    if(@($profile.history|Where-Object id -eq $attemptId).Count){return}
     $pending = @()
     $results = @()
     foreach ($i in 0..($Answers.Count-1)) {
@@ -176,27 +181,28 @@ function Save-ExamResult {
         $stat.attempts++
         $stat.lastResult = if ($right) {'correct'} else {'wrong'}
         if ($right) { $stat.correct++; $stat.streak++ } else { $stat.errors++; $stat.streak=0; $pending += $id }
-        $results += [pscustomobject]@{ question=$q; chosenIndex=$Answers[$i]; correct=$right }
+        $results += [pscustomobject]@{ question=$q; chosenIndex=$Answers[$i]; correct=$right; originalCorrect=$right }
     }
     $profile.pending = @($pending | Select-Object -Unique)
-    $profile.history += [pscustomobject]@{ id=[guid]::NewGuid().ToString(); time=[DateTimeOffset]::Now.ToString('o'); source=$Exam.Source; results=@($results) }
+    $profile.history += [pscustomobject]@{ id=$attemptId; time=[DateTimeOffset]::Now.ToString('o'); source=$Exam.Source; results=@($results) }
     $profile.revision++
     Save-LearningProfile $profile
 }
 
 function Invoke-QuizAgent {
-    param([string]$Role, [string]$Prompt, $Schema)
+    param([string]$Role, [string]$Prompt, $Schema, $Messages = @())
     $settings = Get-LlmSettings
     if (-not ($settings.enabled -and $settings.apiKey -and $settings.baseUrl -and $settings.model)) { throw 'LLM 未配置完整。' }
     $timeout = [Math]::Max(45, [int](Get-PropertyValue $script:Config.llm 'quizRequestTimeoutSeconds' 60))
     $schemaName = 'sleep_guard_' + $Role
     $headers = @{Authorization="Bearer $($settings.apiKey)"; 'Content-Type'='application/json; charset=utf-8'}
+    if(@($Messages).Count -eq 0){$Messages=@(@{role='system';content="你是独立的 $Role agent。严谨执行当前任务，最终只返回 JSON 对象。"},@{role='user';content=$Prompt})}
     if ($settings.apiMode -eq 'responses') {
-        $body = @{model=$settings.model; input=$Prompt; text=@{format=@{type='json_schema';name=$schemaName;strict=$true;schema=$Schema}}}
+        $body = @{model=$settings.model; input=@($Messages); text=@{format=@{type='json_schema';name=$schemaName;strict=$true;schema=$Schema}}}
         $endpoint = Get-ApiEndpoint $settings.baseUrl 'responses'
     } else {
         $limit=if($Role -eq 'author'){6500}else{4000}
-        $body = @{model=$settings.model;messages=@(@{role='system';content="你是独立的 $Role agent。严谨执行当前任务，最终只返回 JSON 对象。"},@{role='user';content=$Prompt});max_tokens=$limit;response_format=@{type='json_object'}}
+        $body = @{model=$settings.model;messages=@($Messages);max_tokens=$limit;response_format=@{type='json_object'}}
         if(([uri]$settings.baseUrl).Host -match '(^|\.)deepseek\.com$'){$body.thinking=@{type='disabled'}}
         $endpoint = Get-ApiEndpoint $settings.baseUrl 'chat/completions'
     }
@@ -268,7 +274,10 @@ function Invoke-ReviewedQuestionRequest {
     $document = Invoke-QuizAgent 'author' $prompt (Get-QuestionJsonSchema -Count @($KnowledgePoints).Count)
     $questions = @(ConvertTo-ValidatedQuestionSet $document $KnowledgePoints $past)
     $seenFingerprints = @($profile.seen | ForEach-Object {Get-QuestionFingerprint $_.stem}) + @($ExcludedStems | ForEach-Object {Get-QuestionFingerprint $_})
-    foreach ($q in $questions) { if ((Get-QuestionFingerprint $q.stem) -in $seenFingerprints) {throw '生成题复用了历史题干。'} }
+    foreach ($q in $questions) {
+        if ((Get-QuestionFingerprint $q.stem) -in $seenFingerprints) {throw '生成题复用了历史题干。'}
+        if((Get-QuestionFingerprint $q.stem) -in @($profile.quarantined)){throw '生成题复用了已确认存在问题的题干。'}
+    }
     $rangeInput = @($questions | Select-Object knowledgePointId,stem,options,grammarPoint) | ConvertTo-Json -Depth 8 -Compress
     $scope = Invoke-QuizAgent 'n4_scope_reviewer' @"
 独立审查以下 $($questions.Count) 道题的词汇、语法、句型是否适合JLPT N4（允许N5基础），并确认实际考查内容对应提供的知识点。官方没有逐词逐语法清单，请按基础日语能力和官方公开样题校准；难度不确定或超纲则passed=false。不得为了凑题通过。逐题返回 {"reviews":[{"knowledgePointId":"id","passed":true,"reason":"40字内依据"}]}。reviews数组必须正好有 $($questions.Count) 项，每个试题id一次，包含全部：$($questions.knowledgePointId -join ',')。
@@ -303,6 +312,7 @@ function Get-QuestionSet {
     param($KnowledgePoints, [string[]]$ExcludedStems = @())
     $profile = Get-LearningProfile
     $official = @(Get-OfficialQuestions)
+    $official = @($official|Where-Object {(Get-QuestionFingerprint $_.stem) -notin @($profile.quarantined)})
     $questions = @()
     $missing = @()
     foreach ($p in @($KnowledgePoints)) {
@@ -332,7 +342,7 @@ function Get-QuestionSet {
             $cache=@()
             if(Test-Path -LiteralPath $script:ReviewedCachePath){$cache=@((Get-Content -LiteralPath $script:ReviewedCachePath -Raw -Encoding UTF8|ConvertFrom-Json).questions)}
             foreach($p in $missing){
-                $approved=@($cache|Where-Object {$_.pipelineVersion -eq 1 -and $_.question.knowledgePointId -eq $p.id -and $_.question.stem -notin $ExcludedStems}|Select-Object -Last 1)
+                $approved=@($cache|Where-Object {$_.pipelineVersion -eq 1 -and $_.question.knowledgePointId -eq $p.id -and $_.question.stem -notin $ExcludedStems -and (Get-QuestionFingerprint $_.question.stem) -notin @($profile.quarantined)}|Select-Object -Last 1)
                 $knownReal=@($official|Where-Object {$_.knowledgePointId -eq $p.id -and $_.stem -notin $ExcludedStems}|Get-Random -Count 1)
                 if($knownReal.Count){$questions+=$knownReal[0];$officialCount++}
                 elseif($approved.Count){$questions+=$approved[0].question;$cachedCount++}

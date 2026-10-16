@@ -8,7 +8,9 @@ param(
     [switch]$TestScheduleUpdate,
     [switch]$PreviewLibrary,
     [switch]$TestLearning,
-    [switch]$TestUi
+    [switch]$TestUi,
+    [switch]$TestAppeals,
+    [switch]$TestAppealApi
 )
 
 $ErrorActionPreference = 'Stop'
@@ -380,6 +382,12 @@ function Assert-KnowledgeBank {
 }
 
 . (Join-Path $PSScriptRoot 'Learning-Engine.ps1')
+. (Join-Path $PSScriptRoot 'Appeal-Engine.ps1')
+
+if($TestAppeals -or $TestAppealApi){
+    . (Join-Path $PSScriptRoot 'Test-Appeals.ps1')
+    exit 0
+}
 
 if ($TestLearning) {
     . (Join-Path $PSScriptRoot 'Test-Learning.ps1')
@@ -473,7 +481,9 @@ function Show-GuardianDialog {
     param([Windows.Forms.Form]$Dialog, [Windows.Forms.Form]$Owner, [string]$Name)
     if($script:UiTestRoot){
         $capturePath=Join-Path $script:UiTestRoot ($Name+'.png')
+        $beforeCapture=$script:UiBeforeCapture
         $Dialog.Add_Shown({
+            if($beforeCapture){& $beforeCapture $this}
             $this.Refresh()
             $bitmap=New-Object Drawing.Bitmap($this.Width,$this.Height)
             try{$this.DrawToBitmap($bitmap,(New-Object Drawing.Rectangle(0,0,$this.Width,$this.Height)));$bitmap.Save($capturePath)}finally{$bitmap.Dispose()}
@@ -764,8 +774,15 @@ function Show-QuizForm {
 
 function Show-ReviewForm {
     param([Windows.Forms.Form]$Owner, $Exam, [int[]]$Answers)
-    $allCorrect = $true
-    for ($i = 0; $i -lt 10; $i++) { if ($Answers[$i] -ne [int]$Exam.Questions[$i].correctIndex) { $allCorrect = $false } }
+    do{$result=Show-ReviewPage -Owner $Owner -Exam $Exam -Answers $Answers}while($result -eq [Windows.Forms.DialogResult]::Ignore)
+    return $result
+}
+
+function Show-ReviewPage {
+    param([Windows.Forms.Form]$Owner, $Exam, [int[]]$Answers)
+    $marking=@(Get-ExamMarking $Exam $Answers)
+    $score=@($marking|Where-Object Correct).Count
+    $allCorrect=($score -eq $Exam.Questions.Count)
 
     $form = New-Object Windows.Forms.Form
     $form.Text = '睡眠守卫 · 答案与解析'
@@ -777,7 +794,7 @@ function Show-ReviewForm {
     $form.Font = $script:UiFont
 
     $title = New-Object Windows.Forms.Label
-    $title.Text = if ($allCorrect) { '10 / 10，全对啦。你已经完成今晚的解锁条件。' } else { '这次还没有全对。答案和解析都在下面，慢慢看。' }
+    $title.Text = if ($allCorrect) { '10 / 10，全部通过。你已经完成今晚的解锁条件。' } else { "$score / 10。对错题有疑问，可以点题目下方的「申辩」。" }
     $title.Font = $script:TitleFont
     $title.ForeColor = if ($allCorrect) { $script:Colors.Green } else { $script:Colors.Rose }
     $title.AutoSize = $true
@@ -797,7 +814,7 @@ function Show-ReviewForm {
         $q = $Exam.Questions[$i]
         $correct = [int]$q.correctIndex
         $chosen = [int]$Answers[$i]
-        $isRight = $chosen -eq $correct
+        $isRight = $marking[$i].Correct
         $card = New-Object Windows.Forms.Panel
         $card.Location = New-Object Drawing.Point(6, $y)
         $card.Size = New-Object Drawing.Size(810, 262)
@@ -824,6 +841,7 @@ function Show-ReviewForm {
 
         $answerLabel = New-Object Windows.Forms.Label
         $answerLabel.Text = "你的答案：$([char](65 + $chosen)). $($q.options[$chosen])　　正确答案：$([char](65 + $correct)). $($q.options[$correct])"
+        if($marking[$i].AppealAccepted){$answerLabel.Text="申辩已通过，本题按正确计分。你的原选择：$([char](65+$chosen)). $($q.options[$chosen])"}
         $answerLabel.Font = $script:UiFont
         $answerLabel.ForeColor = if ($isRight) { $script:Colors.Green } else { $script:Colors.Rose }
         $answerLabel.Location = New-Object Drawing.Point(14, $answerTop)
@@ -837,6 +855,25 @@ function Show-ReviewForm {
         $explain.Location = New-Object Drawing.Point(14, ($answerTop+35))
         $explain.Size = New-Object Drawing.Size(775, 135)
         $card.Controls.Add($explain)
+
+        if($marking[$i].AppealAccepted){
+            $explain.Text="申辩结论：$($marking[$i].Reason)`r`n原判解析（保留供追溯）：$($q.explanation)"
+        }
+        if(-not $isRight){
+            $appealButton=New-UiButton -Text '对本题有疑问，申辩' -Width 195 -Height 32
+            $appealButton.Location=New-Object Drawing.Point(14,($card.Height+4))
+            $appealButton.Tag=[pscustomobject]@{Exam=$Exam;Index=$i}
+            $card.Height+=46
+            $appealButton.Add_Click({
+                $page=$this.FindForm()
+                $item=$this.Tag
+                try{
+                    $accepted=Show-QuestionAppeal -Owner $page -Exam $item.Exam -QuestionIndex $item.Index
+                    if($accepted){$page.DialogResult=[Windows.Forms.DialogResult]::Ignore;$page.Close()}
+                }catch{[void][Windows.Forms.MessageBox]::Show($page,$_.Exception.Message,'申辩暂未完成','OK','Information')}
+            })
+            $card.Controls.Add($appealButton)
+        }
 
         $panel.Controls.Add($card)
         $y += $card.Height+10
@@ -1090,8 +1127,10 @@ if ($TestScheduleUpdate) {
 }
 
 . (Join-Path $PSScriptRoot 'Learning-Library.ps1')
+. (Join-Path $PSScriptRoot 'Appeal-Dialog.ps1')
 
 if($TestUi){
+    [Windows.Forms.Application]::SetUnhandledExceptionMode([Windows.Forms.UnhandledExceptionMode]::ThrowException)
     . (Join-Path $PSScriptRoot 'Test-UI.ps1')
     exit 0
 }

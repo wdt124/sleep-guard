@@ -1,5 +1,13 @@
 ﻿function Show-LearningLibrary {
     param([Windows.Forms.Form]$Owner, [switch]$Mistakes)
+    do{
+        $result=Show-LearningLibraryPage -Owner $Owner -Mistakes:$Mistakes
+        if($result -eq [Windows.Forms.DialogResult]::Retry){$Mistakes=$true}
+    }while($result -eq [Windows.Forms.DialogResult]::Retry)
+}
+
+function Show-LearningLibraryPage {
+    param([Windows.Forms.Form]$Owner, [switch]$Mistakes)
     $profile=Get-LearningProfile
     $library=New-Object Windows.Forms.Form
     $library.Text='睡眠守卫 · 知识库与错题本'
@@ -81,6 +89,10 @@
     $wrongList.HorizontalScrollbar=$true
     $wrongList.DisplayMember='Label'
     $wrongSplit.Panel1.Controls.Add($wrongList)
+    $appealButton=New-UiButton -Text '对选中错题申辩' -Height 34
+    $appealButton.Dock='Bottom'
+    $appealButton.Enabled=$false
+    $wrongSplit.Panel1.Controls.Add($appealButton)
     $wrongDetail=New-Object Windows.Forms.TextBox
     $wrongDetail.Dock='Fill'
     $wrongDetail.ReadOnly=$true
@@ -97,11 +109,14 @@
     $wrongSplit.Panel2.Controls.Add($wrongPicture)
     $allWrong=@()
     foreach($exam in @($profile.history | Sort-Object time -Descending)) {
-        foreach($result in @($exam.results | Where-Object {-not $_.correct})) {
+        $storedExam=[pscustomobject]@{AttemptId=$exam.id;Source=$exam.source;Questions=@($exam.results|ForEach-Object question)}
+        foreach($result in @($exam.results | Where-Object {-not $_.correct -or [string](Get-PropertyValue (Get-PropertyValue $_ 'appeal' $null) 'status' '') -eq 'accepted'})) {
             $q=$result.question
             $stamp=([DateTimeOffset]::Parse($exam.time)).ToLocalTime().ToString('MM-dd HH:mm')
             $label="$stamp · $($q.grammarPoint)"
-            $allWrong += [pscustomobject]@{Label=$label;Question=$q;Chosen=[int]$result.chosenIndex;Time=$exam.time;Source=$exam.source}
+            $appeal=Get-PropertyValue $result 'appeal' $null
+            if([string](Get-PropertyValue $appeal 'status' '') -eq 'accepted'){$label+=' [申辩已通过]'}
+            $allWrong += [pscustomobject]@{Label=$label;Question=$q;Chosen=[int]$result.chosenIndex;Time=$exam.time;Source=$exam.source;Appeal=$appeal;Exam=$storedExam;QuestionIndex=[array]::IndexOf(@($exam.results),$result)}
         }
     }
     foreach($entry in $allWrong){[void]$wrongList.Items.Add($entry)}
@@ -109,6 +124,8 @@
     $wrongList.Add_SelectedIndexChanged({
         $entry=$wrongList.SelectedItem
         if($null -eq $entry){return}
+        $appealButton.Enabled=$true
+        $appealButton.Text=if([string](Get-PropertyValue $entry.Appeal 'status' '') -eq 'accepted'){'查看已通过的申辩对话'}else{'对选中错题申辩'}
         $q=$entry.Question
         if($wrongPicture.Image){$wrongPicture.Image.Dispose();$wrongPicture.Image=$null}
         if($q.imagePath -and (Test-Path -LiteralPath $q.imagePath)){
@@ -119,6 +136,20 @@
         $options=for($j=0;$j -lt 4;$j++){"$([char](65+$j)). $($q.options[$j])"}
         $status=if($q.knowledgePointId -in @($profile.pending)){'下次优先复习'}else{'历史错题'}
         $wrongDetail.Text="$($q.grammarPoint) · $status`r`n$($entry.Time)`r`n`r`n$($q.stem)`r`n`r`n$($options -join "`r`n")`r`n`r`n你的答案：$([char](65+$entry.Chosen)). $($q.options[$entry.Chosen])`r`n正确答案：$([char](65+[int]$q.correctIndex)). $($q.options[[int]$q.correctIndex])`r`n`r`n解析：$($q.explanation)`r`n`r`n本卷来源：$($entry.Source)`r`n题目出处：$($q.source)`r`n$($q.sourceUrl)"
+        if([string](Get-PropertyValue $entry.Appeal 'status' '') -eq 'accepted'){
+            $wrongDetail.Text="申辩已通过，本题已按正确计分。`r`n申辩结论：$($entry.Appeal.reason)`r`n`r`n以下为原始判题记录：`r`n"+$wrongDetail.Text
+        }
+    })
+    $appealButton.Add_Click({
+        $entry=$wrongList.SelectedItem
+        if($null -eq $entry){return}
+        try{
+            $credited=Show-QuestionAppeal -Owner $library -Exam $entry.Exam -QuestionIndex $entry.QuestionIndex
+            if($credited -and [string](Get-PropertyValue $entry.Appeal 'status' '') -ne 'accepted'){
+                $library.DialogResult=[Windows.Forms.DialogResult]::Retry
+                $library.Close()
+            }
+        }catch{[void][Windows.Forms.MessageBox]::Show($library,$_.Exception.Message,'申辩暂未完成','OK','Information')}
     })
     if($Mistakes){$tabs.SelectedTab=$wrongTab}
     if($script:UiTestRoot){
@@ -135,7 +166,8 @@
         }
     }
     $library.Add_Shown({$split.SplitterDistance=320;$wrongSplit.SplitterDistance=320})
-    [void](Show-GuardianDialog $library $Owner 'library')
+    $dialogResult=Show-GuardianDialog $library $Owner 'library'
     if($wrongPicture.Image){$wrongPicture.Image.Dispose();$wrongPicture.Image=$null}
     $library.Dispose()
+    return $dialogResult
 }
